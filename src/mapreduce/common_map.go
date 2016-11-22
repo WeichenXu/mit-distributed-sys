@@ -1,7 +1,11 @@
 package mapreduce
 
 import (
+	"log"
 	"hash/fnv"
+	"io/ioutil"
+	"os"
+	"encoding/json"
 )
 
 // doMap does the job of a map worker: it reads one of the input files
@@ -14,7 +18,6 @@ func doMap(
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(file string, contents string) []KeyValue,
 ) {
-	// TODO:
 	// You will need to write this function.
 	// You can find the filename for this map task's input to reduce task number
 	// r using reduceName(jobName, mapTaskNumber, r). The ihash function (given
@@ -27,6 +30,11 @@ func doMap(
 	// especially when taking into account that both keys and values could
 	// contain newlines, quotes, and any other character you can think of.
 	//
+	dat, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		log.Fatal("doMap read ", err)
+	}
+	pairs := mapF(inFile, string(dat))
 	// One format often used for serializing data to a byte stream that the
 	// other end can correctly reconstruct is JSON. You are not required to
 	// use JSON, but as the output of the reduce tasks *must* be JSON,
@@ -39,6 +47,24 @@ func doMap(
 	//   for _, kv := ... {
 	//     err := enc.Encode(&kv)
 	//
+	for r := 0; r < nReduce; r++{
+		interFile := reduceName(jobName, mapTaskNumber, r)
+		f, err := os.Create(interFile)
+		if err != nil{
+			log.Fatal("doMap Write ", err)
+		}
+		defer f.Close()
+
+		enc := json.NewEncoder(f)
+		for _, e := range pairs{
+			if ihash(e.Key) % uint32(nReduce) == uint32(r){
+				err := enc.Encode(&e)
+				if err != nil{
+					log.Fatal("check ", err)
+				}
+			}
+		}
+	}
 	// Remember to close the file after you have written all the values!
 }
 
