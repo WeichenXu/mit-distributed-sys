@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"sort"
 )
 
 // doReduce does the job of a reduce worker: it reads the intermediate
@@ -24,7 +25,7 @@ func doReduce(
 	// multiple decoded values by creating a decoder, and then repeatedly calling
 	// .Decode() on it until Decode() returns an error.
 	//
-	sortedKVs := make(map[string][]string)
+	reduceKVs := make(map[string][]string)
 	for m := 0; m < nMap; m++{
 		intermediateFile := reduceName(jobName, m, reduceTaskNumber)
 		file, err := os.Open(intermediateFile)
@@ -41,12 +42,12 @@ func doReduce(
 				break
 			}
 
-			_, ok := sortedKVs[kv.Key]
+			_, ok := reduceKVs[kv.Key]
 			if !ok{
 				var tmp []string
-				sortedKVs[kv.Key] = tmp
+				reduceKVs[kv.Key] = tmp
 			}
-			sortedKVs[kv.Key] = append(sortedKVs[kv.Key], kv.Value)
+			reduceKVs[kv.Key] = append(reduceKVs[kv.Key], kv.Value)
 		}
 	}
 	// You should write the reduced output in as JSON encoded KeyValue
@@ -70,7 +71,13 @@ func doReduce(
 
 	enc := json.NewEncoder(file)
 
-	for k, v := range sortedKVs{
-		enc.Encode(KeyValue{k, reduceF(k, v)})
+	// get the sorted keys
+	var sortedKeys []string
+	for k, _ := range reduceKVs{
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+	for _, k := range sortedKeys{
+		enc.Encode(KeyValue{k, reduceF(k, reduceKVs[k])})
 	}
 }
