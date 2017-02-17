@@ -31,28 +31,28 @@ func (mr *Master) schedule(phase jobPhase) {
 	//
 
 	var wg sync.WaitGroup
-	var worker string
 	wg.Add(ntasks)
 	// initiate ntasks doWork RPC call
 	for i := 0; i < ntasks; i++{
-		worker = <-mr.registerChannel
 		go func(i int){
 			// set up the RPC argument
+			var worker string
+			var ok bool
 			args := new(DoTaskArgs)
 			args.JobName = mr.jobName
 			args.Phase = phase
 			args.NumOtherPhase = nios
 			args.TaskNumber = i
 			args.File = mr.files[i]
-			ok := call(worker, "Worker.DoTask", args, new(struct{}))
-			if ok == false{
-				fmt.Printf("RPC do work error\n")
-			}else {
-				// will get blocked if we enqueue the message first
-				wg.Done()
-				mr.registerChannel <- worker
+
+			// assign the current task to a worker until it succeed
+			for ok == false{
+				worker = <-mr.registerChannel
+				ok = call(worker, "Worker.DoTask", args, new(struct{}))
 			}
-			fmt.Printf("Task: %v finished\n", i)
+			// will get blocked if we enqueue the message first
+			wg.Done()
+			mr.registerChannel <- worker
 		}(i)
 	}
 	// wait untill all tasks are finished
