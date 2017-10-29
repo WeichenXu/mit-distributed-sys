@@ -78,12 +78,54 @@ func CrawlMutex(url string, depth int, fetcher Fetcher, f *fetchState) {
 	return
 }
 
+/* parallel with channels */
+func doFetch(url string, fetcher Fetcher, ch chan []string) {
+	body, urls, err := fetcher.Fetch(url)
+	if err != nil {
+		fmt.Println(err)
+		ch <- []string{}
+	} else {
+		fmt.Printf("found: %s %q\n", url, body)
+		ch <- urls
+	}
+}
+
+// task allocator
+func master(ch chan []string, fetcher Fetcher) {
+	// how many live tasks
+	n := 1
+	fetched := make(map[string]bool)
+	for urls := range ch {
+		for _, u := range urls {
+			if _, status := fetched[u]; status == false {
+				fetched[u] = true
+				n += 1
+				go doFetch(u, fetcher, ch)
+			}
+		}
+		// one task has been finished
+		n -= 1
+		if n == 0 {
+			break
+		}
+	}
+}
+
+func CrawlChannel(url string, fetcher Fetcher) {
+	ch := make(chan []string)
+	go func() { ch <- []string{url} }()
+	master(ch, fetcher)
+}
+
 func main() {
 	fmt.Printf("Crawl with serialization\n")
 	CrawlSerialized("http://golang.org/", 4, fetcher)
 	fmt.Printf("--------------------\n")
 	fmt.Printf("Crawl parallel with mutex&waitGroup\n")
 	CrawlMutex("http://golang.org/", 4, fetcher, makeFetchState())
+	fmt.Printf("--------------------\n")
+	fmt.Printf("Crawl parallel with channels\n")
+	CrawlChannel("http://golang.org/", fetcher)
 	fmt.Printf("--------------------\n")
 }
 
