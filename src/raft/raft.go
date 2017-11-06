@@ -19,11 +19,12 @@ package raft
 
 import "sync"
 import "labrpc"
+import "time"
+import "math/rand"
+import "fmt"
 
 // import "bytes"
 // import "encoding/gob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -38,6 +39,30 @@ type ApplyMsg struct {
 }
 
 //
+// Msg to append caching log
+// also signal a heartbeat
+//
+type AppendEntriesArg struct {
+	Index int
+	Term  int
+}
+
+type AppendEntriesReply struct {
+}
+
+//
+// Status of current Raft
+//
+type Status int
+
+const (
+	Leader    Status = iota
+	Follower         = iota
+	Candidate        = iota
+	Undefined        = iota
+)
+
+//
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -49,17 +74,27 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	term               int
+	leader             int
+	applyindex         int
+	timeoutMilliSecond time.Duration
+	applyMsgChan       chan AppendEntriesArg
+	quitChan           chan int
+	status             Status
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	var term int
-	var isleader bool
 	// Your code here.
-	return term, isleader
+	var isLeader = false
+	if rf.status == Leader {
+		isLeader = true
+	}
+	return rf.term, isLeader
 }
 
 //
@@ -90,14 +125,13 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.yyy)
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	RequesterId int
+	Term        int
 }
 
 //
@@ -105,6 +139,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+	VoteMe bool
 }
 
 //
@@ -112,6 +147,34 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.term < args.Term {
+		fmt.Printf("peer %d release leadership to %d in term %d\n", rf.me, args.RequesterId, args.Term)
+		rf.term = args.Term
+		rf.leader = args.RequesterId
+		reply.VoteMe = true
+		if rf.me != rf.leader {
+			rf.status = Follower
+			rf.applyMsgChan <- AppendEntriesArg{}
+		}
+	} else {
+		reply.VoteMe = false
+	}
+	return
+}
+
+//
+// AppendEntries RPC handler
+// 1. append caching log
+// 2. reset timeout
+func (rf *Raft) AppendEntries(args AppendEntriesArg, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term == rf.term {
+		rf.applyMsgChan <- args
+	}
 }
 
 //
@@ -136,6 +199,10 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArg, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -155,7 +222,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-
 	return index, term, isLeader
 }
 
@@ -167,6 +233,30 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	rf.quitChan <- 1
+	rf.status = Undefined
+}
+
+func (rf *Raft) SendHeartBeat() {
+	rf.mu.Lock()
+	fmt.Printf("%d peer got mastership for term %d\n", rf.me, rf.term)
+	rf.status = Leader
+	rf.leader = rf.me
+	rf.mu.Unlock()
+	go func(rf *Raft) {
+		for {
+			if rf.status == Undefined {
+				break
+			}
+			// send heartbeat
+			for ii, _ := range rf.peers {
+				appendEntriesReply := AppendEntriesReply{}
+				rf.sendAppendEntries(ii, AppendEntriesArg{0, rf.term}, &appendEntriesReply)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}(rf)
+	fmt.Printf("%d peer request mastership for term %d end\n", rf.me, rf.term)
 }
 
 //
@@ -189,9 +279,61 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
 
+	// setup election timeout in [300, 500]
+	rf.applyMsgChan = make(chan AppendEntriesArg)
+	rf.quitChan = make(chan int)
+	rf.status = Undefined
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rf.timeoutMilliSecond = time.Duration(1000 + r.Intn(200))
+	fmt.Printf("%d peer select timeout %d ms\n", rf.me, rf.timeoutMilliSecond)
+
+	go func(rf *Raft) {
+		for {
+			select {
+			case <-rf.quitChan:
+				break
+			case args := <-rf.applyMsgChan:
+				fmt.Printf(time.Now().Format("15:04:05.999999 "))
+				rf.mu.Lock()
+				fmt.Printf("peer %d received appendEntries for term%d\n", rf.me, args.Term)
+				rf.mu.Unlock()
+				// receive heartbeat
+			case <-time.After(rf.timeoutMilliSecond * time.Millisecond):
+				fmt.Printf(time.Now().Format("15:04:05.999999 "))
+				rf.mu.Lock()
+				rf.leader = rf.me
+				rf.status = Candidate
+				rf.term++
+				// request mastership
+				requestArg := RequestVoteArgs{rf.me, rf.term}
+				replyArg := RequestVoteReply{false}
+				votesSum := 0
+				fmt.Printf("%d peer request mastership for term %d\n", rf.me, rf.term)
+				rf.mu.Unlock()
+
+				var mm sync.Mutex
+				for ii, _ := range peers {
+					if ii != rf.me {
+						go func(ii int) {
+							ok := rf.sendRequestVote(ii, requestArg, &replyArg)
+							fmt.Printf("%d -> %d reply mastership for term %d %d\n", rf.me, ii, rf.term, replyArg.VoteMe)
+							if ok && replyArg.VoteMe {
+								mm.Lock()
+								votesSum++
+								if votesSum >= len(rf.peers)/2 {
+									rf.SendHeartBeat()
+								}
+								mm.Unlock()
+							}
+						}(ii)
+					}
+				}
+			}
+		}
+	}(rf)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
