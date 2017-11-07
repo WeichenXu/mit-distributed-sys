@@ -126,7 +126,7 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 //
-// example RequestVote RPC arguments structure.
+// RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
 	// Your data here.
@@ -135,7 +135,7 @@ type RequestVoteArgs struct {
 }
 
 //
-// example RequestVote RPC reply structure.
+// RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
 	// Your data here.
@@ -143,7 +143,9 @@ type RequestVoteReply struct {
 }
 
 //
-// example RequestVote RPC handler.
+// RequestVote RPC handler.
+// 1. Release lock if request Term > rf.term
+// 2. Reset voteTimeout -> by send a dummy heartbeat to applyMsgChan
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
@@ -234,29 +236,66 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.quitChan <- 1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.status = Undefined
 }
 
+//
+// Send Heartbeat to all peers
+// Until rf.status != leader
+//
 func (rf *Raft) SendHeartBeat() {
-	rf.mu.Lock()
-	fmt.Printf("%d peer got mastership for term %d\n", rf.me, rf.term)
-	rf.status = Leader
-	rf.leader = rf.me
-	rf.mu.Unlock()
-	go func(rf *Raft) {
-		for {
-			if rf.status == Undefined {
-				break
-			}
+	for {
+		rf.mu.Lock()
+		if rf.status == Leader {
+			appendEntriesArg := AppendEntriesArg{0, rf.term}
+			rf.mu.Unlock()
 			// send heartbeat
 			for ii, _ := range rf.peers {
 				appendEntriesReply := AppendEntriesReply{}
-				rf.sendAppendEntries(ii, AppendEntriesArg{0, rf.term}, &appendEntriesReply)
+				go rf.sendAppendEntries(ii, appendEntriesArg, &appendEntriesReply)
 			}
-			time.Sleep(100 * time.Millisecond)
+		} else {
+			rf.mu.Unlock()
+			// terminate heartbeat
+			break
 		}
-	}(rf)
-	fmt.Printf("%d peer request mastership for term %d end\n", rf.me, rf.term)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+//
+// Request Mastership from all peers
+// 1. go RequestVote RPC async
+// 2. go SendHeartBeat() when votes == half of size
+//
+func (rf *Raft) RequestMastership() {
+	var votesSum = 0
+	var mm sync.Mutex
+	for ii, _ := range rf.peers {
+		if ii != rf.me {
+			go func(ii int) {
+				// request mastership
+				rf.mu.Lock()
+				requestArg := RequestVoteArgs{rf.me, rf.term}
+				rf.mu.Unlock()
+				replyArg := RequestVoteReply{false}
+				ok := rf.sendRequestVote(ii, requestArg, &replyArg)
+				//fmt.Printf("%d -> %d reply mastership for term %d %d\n", rf.me, ii, rf.term, replyArg.VoteMe)
+				if ok && replyArg.VoteMe {
+					mm.Lock()
+					votesSum++
+					if votesSum == len(rf.peers)/2 {
+						rf.status = Leader
+						//fmt.Printf("%d peer got mastership for term %d start sending heartbeat.\n", rf.me, rf.term)
+						go rf.SendHeartBeat()
+					}
+					mm.Unlock()
+				}
+			}(ii)
+		}
+	}
 }
 
 //
@@ -279,11 +318,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
 
-	// setup election timeout in [300, 500]
 	rf.applyMsgChan = make(chan AppendEntriesArg)
 	rf.quitChan = make(chan int)
 	rf.status = Undefined
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	// setup election timeout in [150, 300]
 	rf.timeoutMilliSecond = time.Duration(150 + r.Intn(150))
 	fmt.Printf("%d peer select timeout %d ms\n", rf.me, rf.timeoutMilliSecond)
 
@@ -291,7 +330,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		for {
 			select {
 			case <-rf.quitChan:
+				rf.mu.Lock()
 				rf.status = Undefined
+				rf.mu.Unlock()
 				break
 			case args := <-rf.applyMsgChan:
 				rf.mu.Lock()
@@ -300,35 +341,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.mu.Unlock()
 				// receive heartbeat
 			case <-time.After(rf.timeoutMilliSecond * time.Millisecond):
-				fmt.Printf(time.Now().Format("15:04:05.999999 "))
 				rf.mu.Lock()
+				fmt.Printf(time.Now().Format("15:04:05.999999 "))
 				rf.leader = rf.me
 				rf.status = Candidate
 				rf.term++
-				// request mastership
-				requestArg := RequestVoteArgs{rf.me, rf.term}
-				replyArg := RequestVoteReply{false}
-				votesSum := 0
 				fmt.Printf("%d peer request mastership for term %d\n", rf.me, rf.term)
 				rf.mu.Unlock()
-
-				var mm sync.Mutex
-				for ii, _ := range peers {
-					if ii != rf.me {
-						go func(ii int) {
-							ok := rf.sendRequestVote(ii, requestArg, &replyArg)
-							fmt.Printf("%d -> %d reply mastership for term %d %d\n", rf.me, ii, rf.term, replyArg.VoteMe)
-							if ok && replyArg.VoteMe {
-								mm.Lock()
-								votesSum++
-								if votesSum == len(rf.peers)/2 {
-									rf.SendHeartBeat()
-								}
-								mm.Unlock()
-							}
-						}(ii)
-					}
-				}
+				go rf.RequestMastership()
 			}
 		}
 	}(rf)
