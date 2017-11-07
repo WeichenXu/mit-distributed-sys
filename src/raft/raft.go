@@ -284,17 +284,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.quitChan = make(chan int)
 	rf.status = Undefined
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.timeoutMilliSecond = time.Duration(1000 + r.Intn(200))
+	rf.timeoutMilliSecond = time.Duration(150 + r.Intn(150))
 	fmt.Printf("%d peer select timeout %d ms\n", rf.me, rf.timeoutMilliSecond)
 
 	go func(rf *Raft) {
 		for {
 			select {
 			case <-rf.quitChan:
+				rf.status = Undefined
 				break
 			case args := <-rf.applyMsgChan:
-				fmt.Printf(time.Now().Format("15:04:05.999999 "))
 				rf.mu.Lock()
+				fmt.Printf(time.Now().Format("15:04:05.999999 "))
 				fmt.Printf("peer %d received appendEntries for term%d\n", rf.me, args.Term)
 				rf.mu.Unlock()
 				// receive heartbeat
@@ -320,7 +321,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							if ok && replyArg.VoteMe {
 								mm.Lock()
 								votesSum++
-								if votesSum >= len(rf.peers)/2 {
+								if votesSum == len(rf.peers)/2 {
 									rf.SendHeartBeat()
 								}
 								mm.Unlock()
